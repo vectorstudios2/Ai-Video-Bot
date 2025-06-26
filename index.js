@@ -15,7 +15,6 @@ const port = process.env.PORT || 3000;
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-// NOW LOADED FROM .env 🔐
 const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
 const TELEGRAM_CHAT_ID = "@codewithprakhar";
 
@@ -26,19 +25,28 @@ if (!TELEGRAM_BOT_TOKEN) {
 
 function downloadWithFFmpeg(m3u8Url, outputPath) {
   return new Promise((resolve, reject) => {
-    const cmd = `ffmpeg -y -i "${m3u8Url}" -c copy "${outputPath}"`;
-    exec(cmd, (err, stdout, stderr) => {
-      if (err) reject(new Error("FFmpeg error: " + stderr));
-      else resolve();
-    });
+    try {
+      const cmd = `ffmpeg -y -i "${m3u8Url}" -c copy "${outputPath}"`;
+      exec(cmd, (err, stdout, stderr) => {
+        if (err) {
+          console.error("FFmpeg Exec Error:", stderr);
+          reject(new Error("FFmpeg error: " + stderr));
+        } else {
+          resolve();
+        }
+      });
+    } catch (err) {
+      console.error("FFmpeg Catch Error:", err.message);
+      reject(new Error("Unexpected FFmpeg error: " + err.message));
+    }
   });
 }
 
 async function uploadToGofile(filePath) {
-  const form = new FormData();
-  form.append("file", fs.createReadStream(filePath));
-
   try {
+    const form = new FormData();
+    form.append("file", fs.createReadStream(filePath));
+
     const response = await axios.post(
       "https://store1.gofile.io/uploadFile",
       form,
@@ -56,81 +64,142 @@ async function uploadToGofile(filePath) {
       throw new Error("Gofile API failed: " + JSON.stringify(data));
     }
   } catch (err) {
+    console.error("Upload Gofile Error:", err.message);
     throw new Error("Gofile upload error: " + err.message);
   }
 }
 
 function sendToTelegram(filePath, prompt) {
   return new Promise((resolve, reject) => {
-    const form = new FormData();
-    form.append("chat_id", TELEGRAM_CHAT_ID);
-    form.append("caption", `🎥 Prompt: ${prompt}`);
-    form.append("video", fs.createReadStream(filePath));
+    try {
+      const form = new FormData();
+      form.append("chat_id", TELEGRAM_CHAT_ID);
+      form.append("caption", `🎥 Prompt: ${prompt}`);
+      form.append("video", fs.createReadStream(filePath));
 
-    const req = https.request({
-      hostname: "api.telegram.org",
-      path: `/bot${TELEGRAM_BOT_TOKEN}/sendVideo`,
-      method: "POST",
-      headers: form.getHeaders(),
-    }, res => {
-      let data = "";
-      res.on("data", chunk => data += chunk);
-      res.on("end", () => {
-        try {
-          const json = JSON.parse(data);
-          if (json.ok && json.result?.message_id) {
-            const msgId = json.result.message_id;
-            const messageLink = `https://t.me/${TELEGRAM_CHAT_ID.replace('@', '')}/${msgId}`;
-            resolve({
-              message_id: msgId,
-              message_link: messageLink
-            });
-          } else {
-            reject(new Error("Telegram failed: " + data));
+      const req = https.request({
+        hostname: "api.telegram.org",
+        path: `/bot${TELEGRAM_BOT_TOKEN}/sendVideo`,
+        method: "POST",
+        headers: form.getHeaders(),
+      }, res => {
+        let data = "";
+        res.on("data", chunk => data += chunk);
+        res.on("end", () => {
+          try {
+            const json = JSON.parse(data);
+            if (json.ok && json.result?.message_id) {
+              const msgId = json.result.message_id;
+              const messageLink = `https://t.me/${TELEGRAM_CHAT_ID.replace('@', '')}/${msgId}`;
+              resolve({
+                message_id: msgId,
+                message_link: messageLink
+              });
+            } else {
+              console.error("Telegram response fail:", data);
+              reject(new Error("Telegram failed: " + data));
+            }
+          } catch (parseErr) {
+            console.error("Telegram response parse error:", parseErr.message);
+            reject(new Error("Invalid response from Telegram"));
           }
-        } catch {
-          reject(new Error("Invalid response from Telegram"));
-        }
+        });
       });
-    });
 
-    req.on("error", reject);
-    form.pipe(req);
+      req.on("error", (err) => {
+        console.error("Telegram request error:", err.message);
+        reject(err);
+      });
+
+      form.pipe(req);
+    } catch (err) {
+      console.error("Telegram Send Error:", err.message);
+      reject(new Error("Unexpected Telegram error: " + err.message));
+    }
   });
 }
 
 app.get("/generate-video", async (req, res) => {
   const { prompt, seed = 3, fps = 10 } = req.query;
-  if (!prompt) return res.status(400).send("Missing prompt. This ain't it, chief.");
+
+  if (!prompt) {
+    console.warn("Missing prompt. User skill issue.");
+    return res.status(400).send("Missing prompt. This ain't it, chief.");
+  }
+
+  let outputPath = "";
 
   try {
-    const client = await Client.connect("multimodalart/self-forcing");
-    const result = await client.predict("/video_generation_handler_streaming", {
-      prompt,
-      seed: Number(seed),
-      fps: Number(fps),
-    });
+    let client;
+    try {
+      client = await Client.connect("multimodalart/self-forcing");
+    } catch (err) {
+      throw new Error("Failed to connect to Gradio: " + err.message);
+    }
+
+    let result;
+    try {
+      result = await client.predict("/video_generation_handler_streaming", {
+        prompt,
+        seed: Number(seed),
+        fps: Number(fps),
+      });
+    } catch (err) {
+      throw new Error("Gradio prediction error: " + err.message);
+    }
 
     const m3u8Url = result.data[0]?.video?.url;
-    if (!m3u8Url?.startsWith("http")) throw new Error("Invalid M3U8 URL");
+    if (!m3u8Url?.startsWith("http")) {
+      throw new Error("Invalid M3U8 URL from prediction");
+    }
 
     const filename = `gen_${Date.now()}.mp4`;
-    const outputPath = path.join(__dirname, filename);
+    outputPath = path.join(__dirname, filename);
 
-    await downloadWithFFmpeg(m3u8Url, outputPath);
-    const publicUrl = await uploadToGofile(outputPath);
-    const telegramInfo = await sendToTelegram(outputPath, prompt);
+    try {
+      await downloadWithFFmpeg(m3u8Url, outputPath);
+    } catch (err) {
+      throw new Error("Video download failed: " + err.message);
+    }
 
-    fs.unlink(outputPath, () => {});
+    let publicUrl, telegramInfo;
+
+    try {
+      publicUrl = await uploadToGofile(outputPath);
+    } catch (err) {
+      throw new Error("Upload to Gofile failed: " + err.message);
+    }
+
+    try {
+      telegramInfo = await sendToTelegram(outputPath, prompt);
+    } catch (err) {
+      throw new Error("Telegram send failed: " + err.message);
+    }
+
+    fs.unlink(outputPath, () => {
+      console.log(`🧹 Cleaned up: ${outputPath}`);
+    });
+
     res.json({
       url: publicUrl,
       message: "Sent to group successfully.",
       link: telegramInfo.message_link
     });
+
   } catch (err) {
-    console.error("Error:", err);
+    console.error("Final handler error:", err.message);
+    if (outputPath && fs.existsSync(outputPath)) {
+      fs.unlinkSync(outputPath);
+    }
     res.status(500).json({ error: err.message });
   }
 });
 
-app.listen(port, () => console.log(`🔥 API running on http://localhost:${port}`));
+app.listen(port, () => {
+  try {
+    console.log(`🔥 API running on http://localhost:${port}`);
+  } catch (err) {
+    console.error("Server startup fail:", err.message);
+    process.exit(1);
+  }
+});
