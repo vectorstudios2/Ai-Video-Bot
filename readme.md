@@ -61,10 +61,8 @@ curl "https://your-render-app.onrender.com/generate-video?prompt=elon%20musk%20v
 ```json
 {
   "url": "https://gofile.io/d/abc123",
-  "telegram": {
-    "message": "Sent to group successfully.",
-    "link": "https://t.me/codewithprakhar/87"
-  }
+  "message": "Sent to group successfully.",
+  "link": "https://t.me/codewithprakhar/87"
 }
 ```
 

@@ -124,10 +124,8 @@ app.get("/generate-video", async (req, res) => {
     fs.unlink(outputPath, () => {});
     res.json({
       url: publicUrl,
-      telegram: {
-        message: "Sent to group successfully.",
-        link: telegramInfo.message_link
-      }
+      message: "Sent to group successfully.",
+      link: telegramInfo.message_link
     });
   } catch (err) {
     console.error("Error:", err);
